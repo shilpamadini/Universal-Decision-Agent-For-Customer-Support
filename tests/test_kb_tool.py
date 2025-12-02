@@ -1,5 +1,3 @@
-# tests/test_kb_tool.py
-
 import json
 import pytest
 from typing import Any, Dict, List
