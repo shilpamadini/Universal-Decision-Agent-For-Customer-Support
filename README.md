@@ -15,7 +15,7 @@ This project meets and exceeds the Udacity rubric for the Multi-Agent Editing & 
 
 ## Table of Contents
 
-1. Project Overview
+1. Overview
 2. Architecture & Design
     * Multi-Agent Pattern
     * Architecture Diagram
@@ -29,7 +29,7 @@ This project meets and exceeds the Udacity rubric for the Multi-Agent Editing & 
 9. Running the App
 10. Running Tests
 
-## Project Overview
+## Overview
 
 Universal Decision Agent simulates a production-grade customer-support agent system, capable of:
 
@@ -65,7 +65,7 @@ Each agent writes into a shared LangGraph state, and the supervisor decides the 
 
 ### Architecture Diagram
 
-![Graph](image-url "Optional title")
+![Graph](https://github.com/shilpamadini/Universal-Decision-Agent-For-Customer-Support/blob/8765e484244cbeb24af5deb5dff2d88e7cbcf8fd/agentic/design/Graph.jpeg)
 
 
 ### State Management
