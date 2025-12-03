@@ -195,39 +195,7 @@ Tool names:
 
 * memory_get_all
 
-## 6. Data Flow
-
-```
-sequenceDiagram
-    participant User
-    participant Intake
-    participant Classifier
-    participant Supervisor
-    participant Resolver
-    participant KB
-    participant Account
-    participant Memory
-    participant Escalation
-
-    User->>Intake: Raw ticket message
-    Intake->>Classifier: summary + normalized issue
-    Classifier->>Supervisor: classification result
-
-    alt Supervisor -> Resolver
-        Supervisor->>Resolver: resolve ticket
-        Resolver->>KB: search knowledge base
-        Resolver->>Account: get user profile + reservations
-        Resolver->>Memory: search prior memories
-        Resolver->>Supervisor: resolution attempt
-    end
-
-    alt Escalation required
-        Supervisor->>Escalation: escalate
-        Escalation->>Memory: write summary
-    end
-```
-
-## 7. State Definition
+## 6. State Definition
 
 Each workflow step updates portions of the shared LangGraph state.
 
@@ -244,7 +212,7 @@ supervisor: dict
 
 All transitions occur through state reducers, ensuring deterministic workflow execution.
 
-## 8. Technologies Used
+## 7. Technologies Used
 
 Core System
 
@@ -267,7 +235,7 @@ Core System
 * Visualization - Mermaid diagrams
 * LangGraph graph export
 
-## 9. Deployment & Execution
+## 8. Deployment & Execution
 * Run MCP servers
 * python mcp_services/kb/server.py
 * python mcp_services/account/server.py
@@ -283,7 +251,7 @@ Core System
       pytest -q
     ```
 
-## 11. Conclusion
+## 9. Conclusion
 
 The UDA-Hub architecture provides a robust, scalable, and testable design for automated ticket resolution using:
 
