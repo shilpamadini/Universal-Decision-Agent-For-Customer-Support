@@ -128,7 +128,7 @@ UDA-Hub is designed to handle **normalized ticket objects** rather than raw stri
 
 ```
 
-### 4.7 How Different Ticket Types Are Handled**
+### 4.7 How Different Ticket Types Are Handled
 
 * Login / Access Issues
 
