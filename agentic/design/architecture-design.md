@@ -45,100 +45,159 @@ The orchestrator defines:
 Located in:
 agentic/workflow.py
 
-## 4. Agents
-### 4.1 Intake Agent
+## 4. Agent Interaction & Decision Flow
 
-Goal: Normalize raw ticket text.
+UDA-Hub uses a **Supervisor-based multi-agent architecture**:
 
-Outputs:
+- A central **Supervisor Agent** is responsible for routing and high-level decisions.
+- Specialized worker agents (**Intake, Classifier, Resolver, Escalation**) each focus on a narrow, well-defined task.
+- All agents share a common state managed by **LangGraph**, and the Supervisor decides:
+  - which agent to invoke next,
+  - when to stop,
+  - when to escalate to a human.
 
-* summary
+This pattern makes it easy to:
+- Add new agents (e.g., a SentimentPrioritizer or RefundAgent),
+- Evolve routing logic without changing individual agent implementations,
+- Observe and debug decisions through structured state and logs.
+### 4.1. Intake Agent
+   - Receives the raw ticket payload (text + metadata).
+   - Normalizes and enriches the ticket into:
+     - `summary`
+     - `normalized_issue`
+     - `sentiment`
+     - `suspected_language`
+   - Writes these fields into the shared LangGraph state under `intake`.
 
-* normalized_issue
+### 4.2. Classifier Agent
+   - Reads `ticket` and `intake` from state.
+   - Produces:
+     - `issue_type` (e.g., `login`, `billing`, `reservation`)
+     - `urgency` (low / medium / high)
+     - `complexity` (simple / medium / complex)
+     - `should_escalate_immediately` (bool)
+   - Writes results into `classification` in the state.
 
-* sentiment
-
-Used for downstream classification & reasoning.
-
-### 4.2 Classifier Agent
-
-Goal: Predict:
-
-* issue_type
-
-* urgency (low/medium/high)
-
-* complexity
-
-* escalation
-
-Classifier shapes routing decisions.
-
-### 4.3 Supervisor Agent
-
-Goal: Decide next action:
-
-* resolver
-
-* escalation
-
-* END
-
-Based on:
-
-* classifier outputs
-
-* resolver confidence
-
-* agent tool results (KB, memory, account info)
-
-Acts as the “traffic controller” of the workflow.
+### 4.3. Supervisor Agent
+   - Reads `ticket`, `intake`, `classification`, and the latest `resolution` (if any).
+   - Applies decision logic to choose `next_step`, such as:
+     - `"resolver"` (try to auto-resolve)
+     - `"escalation"` (send to human)
+     - `"end"` (ticket handled)
+   - Writes the decision and rationale into `supervisor`.
 
 ### 4.4 Resolver Agent
+   - Triggered when `supervisor.next_step == "resolver"`.
+   - Uses MCP tools:
+     - `kb_search` → retrieve relevant KB articles
+     - `account_get_user` / `account_get_user_reservations` → account context
+     - `memory_search` → similar past tickets / resolutions
+   - Synthesizes a candidate answer and confidence score.
+   - Updates `resolution` with:
+     - `answer`
+     - `status` (`solved`, `not_solved`, `needs_escalation`)
+     - `confidence`
+     - `used_kb_articles`
+   - The Supervisor then reads `resolution` and decides whether to:
+     - End the workflow, or
+     - Loop back for another attempt, or
+     - Escalate.
 
-Uses Tools:
+### 4.5. Escalation Agent
+   - Triggered when `supervisor.next_step == "escalation"` or classification demands immediate escalation.
+   - Reads `ticket`, `intake`, `classification`, and `resolution`.
+   - Produces a structured summary for human handoff:
+     - `summary_for_human`
+     - `recommended_department`
+     - `proposed_next_steps`
+   - Writes escalation info into `escalation` and may write a memory via `memory_write`.
 
-* kb_search
+### 4.6 Input & Output Handling
 
-* account_get_user
+UDA-Hub is designed to handle **normalized ticket objects** rather than raw strings. Each ticket input has the following shape:
 
-* account_get_user_reservations
+```jsonc
+{
+  "ticket_id": "string",
+  "content": "Hi, I can't log in to my account...",
+  "owner_id": "external-user-id",
+  "owner_name": "string",
+  "channel": "chat | email | web | other",
+  "tags": "comma-separated tags (optional)"
+}
 
-* memory_search
+```
 
-Goal: Attempt automated resolution:
+### 4.7 How Different Ticket Types Are Handled**
 
-* pull KB articles
+* Login / Access Issues
 
-* fetch user profile & account context
+    * Classifier sets issue_type = "login", typically with higher urgency.
 
-* retrieve previous memories
+    * Resolver prioritizes KB articles tagged login, password, access.
 
-* build a candidate answer
+If the user reports no reset email and confidence is low, Supervisor tends to escalate to Technical Support.
 
-Returns:
+* Billing / Subscription Questions
 
-* answer
+    * issue_type = "billing" or subscription.
 
-* used_kb_articles
+    * Resolver uses KB search with billing tags and may use account tools to check the user profile.
 
-* confidence
+    * If policies are clear and found in KB, auto-resolution is likely.
 
-* status (solved / not_solved / needs_escalation)
+* Reservation / Experience Issues
 
-### 4.5 Escalation Agent
+    * issue_type = "reservation" or experience.
 
-Creates a human-friendly escalation summary:
+    * Resolver queries:
 
-* clear problem statement
+        * account_get_user_reservations for concrete reservation details.
 
-* context from intake & classification
+        * KB articles on cancellations, no-shows, or event rules.
 
-* resolver notes
+* General / Unknown Issues
 
-* recommended next steps
+    * issue_type = "other".
 
-* target department
+    * Resolver attempts a best-effort KB search using normalized_issue.
+
+    * If low confidence or no matches, Supervisor routes to escalation.
+
+### 5.3 Expected Outputs
+
+For each processed ticket, the final LangGraph state includes:
+
+* ticket → original request metadata.
+
+* intake → normalized issue and sentiment analysis.
+
+* classification → issue type, urgency, complexity.
+
+* resolution:
+
+    * status: "solved" | "not_solved" | "needs_escalation"
+
+    * answer: human-readable suggested reply to the customer (if auto-resolved).
+
+    * confidence: float (0–1) representing model confidence.
+
+    * used_kb_articles: list of article IDs/titles.
+
+* escalation (optional):
+
+    * summary_for_human
+
+    * recommended_department
+
+    * proposed_next_steps
+
+The **external observable** outputs are either:
+
+    * An automated reply (resolution.answer), or
+
+    * An escalation package for a human agent (escalation.*).
+
 
 ## 5. MCP Tools (External Services)
 ### 5.1 Knowledge Base Server (kb)
