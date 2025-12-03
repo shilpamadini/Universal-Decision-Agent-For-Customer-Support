@@ -200,6 +200,7 @@ Everything is stored in the LangGraph state and returned as the final output.
 * Used by Resolver to personalize answers
 
 ## Repository Structure
+```
 uda-hub/
 ├── README.md
 ├── requirements.txt
@@ -265,7 +266,7 @@ uda-hub/
 ├── utils.py                            # Shared utility functions
 │
 ├── dump_mermaid.py                     # utility to draw mermaid diagram of the graph
-
+```
 
 ## Setup Instructions
 1. Create and activate environment
