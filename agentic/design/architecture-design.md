@@ -1,4 +1,4 @@
-# 1.Overview
+# 1. Overview
 
 UDA-Hub is an end-to-end automated customer-support workflow powered by:
 
@@ -16,14 +16,14 @@ UDA-Hub is an end-to-end automated customer-support workflow powered by:
 
 The system processes a customer ticket from raw text → resolution or escalation, while storing contextual memory for future personalization.
 
-## 2.Architecture Diagram 
+## 2. Architecture Diagram 
 
 
 ![Graph](https://github.com/shilpamadini/Universal-Decision-Agent-For-Customer-Support/blob/8765e484244cbeb24af5deb5dff2d88e7cbcf8fd/agentic/design/Graph.jpeg)
 
 
 
-## 3.System Components
+## 3. System Components
 ### 3.1 LangGraph Orchestrator
 
 The orchestrator defines:
