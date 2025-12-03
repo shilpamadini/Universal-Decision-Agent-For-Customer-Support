@@ -12,15 +12,10 @@ This script:
 
 How to run:
 
-    # Activate your env and run the demo once
-    conda activate uda-hub
-    cd /Users/shilpamadini/Desktop/uda-hub
-
-    # Option 1: rely on .env (with OPENAI_API_KEY set)
+    # Option 1: 
     python 03_agentic_app.py --mode demo
 
-    # Option 2: set the key in shell instead of .env
-    export OPENAI_API_KEY="sk-..." 
+    # Option 2: 
     python 03_agentic_app.py --mode chat
 """
 
