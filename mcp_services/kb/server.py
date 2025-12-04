@@ -74,7 +74,7 @@ def kb_get(article_id: str) -> Optional[Dict[str, Any]]:
 @mcp.tool
 def kb_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """
-    Search knowledge base articles by simple keyword matching.
+    Search knowledge base articles by simple keyword overlap.
 
     Args:
         query: Natural language query describing the user's issue.
@@ -87,31 +87,31 @@ def kb_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     if not q:
         return []
 
+    # tokenize query into lowercase words
+    query_words = [w.lower() for w in q.split() if w.strip()]
+    if not query_words:
+        return []
+
     with get_session() as session:
-        like = f"%{q}%"
-        results = (
-            session.query(Knowledge)
-            .filter(
-                or_(
-                    Knowledge.title.ilike(like),
-                    Knowledge.content.ilike(like),
-                    Knowledge.tags.ilike(like),
-                )
-            )
-            .all()
-        )
+        # For our small KB, just pull all articles and score in Python
+        articles: List[Knowledge] = session.query(Knowledge).all()
 
-        query_words = [w.lower() for w in q.split() if w.strip()]
+    scored: List[Dict[str, Any]] = []
+    for art in articles:
+        text = f"{art.title}\n{art.content}\n{art.tags or ''}".lower()
 
-        scored: List[Dict[str, Any]] = []
-        for art in results:
-            text = f"{art.title}\n{art.content}\n{art.tags or ''}".lower()
-            hits = sum(1 for w in query_words if w in text)
-            scored.append(_article_to_dict(art, score=float(hits)))
+        # count how many query words appear anywhere in the article text
+        hits = sum(1 for w in query_words if w in text)
+        if hits <= 0:
+            continue
 
-        scored.sort(key=lambda a: (-a.get("score", 0.0), a["title"]))
+        scored.append(_article_to_dict(art, score=float(hits)))
 
-        return scored[:limit]
+    # sort by score descending, then title for stability
+    scored.sort(key=lambda a: (-a.get("score", 0.0), a["title"]))
+
+    return scored[:limit]
+
 
 
 # Entrypoint

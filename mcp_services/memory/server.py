@@ -97,6 +97,9 @@ def memory_write(
             content=content,
             meta=metadata_json,
         )
+        session.add(entry)       
+        session.commit()         
+        session.refresh(entry)   
         
     return _entry_to_dict(entry)
 

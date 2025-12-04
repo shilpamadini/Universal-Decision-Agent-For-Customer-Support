@@ -50,7 +50,7 @@ async def test_memory_write_and_search_roundtrip():
         }
     )
 
-    # don't rely heavily on the exact return shape; just ensure it responded
+    # Don't rely heavily on the exact return shape; just ensure it responded
     assert write_result is not None
 
     # Search memory
@@ -64,17 +64,15 @@ async def test_memory_write_and_search_roundtrip():
 
     # Normalize JSON-string → list
     if isinstance(search_results, str):
-        if search_results.strip() == "":
-            # No results yet; that's still a valid response
-            assert isinstance(search_results, str)
-            return
+        assert search_results.strip() != "", "Memory search returned an empty string"
         parsed = json.loads(search_results)
     else:
         parsed = search_results
 
-    assert isinstance(parsed, list)
+    # We now REQUIRE that at least one result exists after writing
+    assert isinstance(parsed, list), "Memory search did not return a list"
+    assert len(parsed) >= 1, "Memory search returned no results after write"
 
     # Ideally, one of the entries mentions "login"
-    if parsed:
-        joined = " ".join(str(r) for r in parsed)
-        assert "login" in joined.lower()
+    joined = " ".join(str(r) for r in parsed)
+    assert "login" in joined.lower()

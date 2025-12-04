@@ -1,8 +1,10 @@
 from __future__ import annotations
-
+import json
+import re
 from typing import Any, Dict, List, Optional, TypedDict
 import asyncio
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from langchain_openai import ChatOpenAI
@@ -14,8 +16,10 @@ from agentic.agents.intake_agent import build_intake_agent
 from agentic.agents.classifier_agent import build_classifier_agent
 from agentic.agents.escalation_agent import build_escalation_agent
 from agentic.agents.supervisor_agent import build_supervisor_agent
-
-from agentic.tools.knowledge_client import get_kb_search_tool
+from agentic.tools.knowledge_client import (
+    get_kb_search_tool,  
+    aget_kb_tools,
+)
 from agentic.tools.account_client import (
     get_account_get_user_tool,
     get_account_get_user_reservations_tool,
@@ -25,20 +29,16 @@ from agentic.tools.memory_client import (
     get_memory_search_tool,
 )
 
+from logger import get_logger
+
+log = get_logger()
+
 
 # State schema
 
 class TicketState(TypedDict, total=False):
     """
     Shared state for the UDA-Hub workflow.
-
-    Keys:
-        ticket:        Raw ticket info (content + metadata)
-        intake:        Output of IntakeAgent
-        classification:Output of ClassifierAgent
-        resolution:    Output of Resolver node (agent)
-        escalation:    Output of EscalationAgent
-        supervisor:    Output of SupervisorAgent
     """
 
     ticket: Dict[str, Any]
@@ -51,32 +51,47 @@ class TicketState(TypedDict, total=False):
 
 # Global models & tools
 
-# Core LLM (used by resolver + helper prompts)
 LLM = ChatOpenAI(model="gpt-4o-mini")
 
-# Instantiate agents 
 INTAKE_AGENT = build_intake_agent()
 CLASSIFIER_AGENT = build_classifier_agent()
 ESCALATION_AGENT = build_escalation_agent()
 SUPERVISOR_AGENT = build_supervisor_agent()
 
-# MCP-backed tools (LangChain tools)
-KB_SEARCH_TOOL = get_kb_search_tool()
+#KB_SEARCH_TOOL = get_kb_search_tool()
 ACCOUNT_GET_USER_TOOL = get_account_get_user_tool()
 ACCOUNT_GET_RESERVATIONS_TOOL = get_account_get_user_reservations_tool()
 MEMORY_WRITE_TOOL = get_memory_write_tool()
 MEMORY_SEARCH_TOOL = get_memory_search_tool()
 
 
+# helper to extract IDs for logging
+def _ids_for_log(state: TicketState, config: RunnableConfig | None = None) -> Dict[str, Any]:
+    ticket = state.get("ticket", {}) or {}
+    ticket_id = ticket.get("ticket_id")
+    thread_id = None
+
+    if config is not None:
+        cfg = config.get("configurable", {}) or {}
+        thread_id = cfg.get("thread_id")
+
+    data: Dict[str, Any] = {}
+    if ticket_id:
+        data["ticket_id"] = ticket_id
+    if thread_id:
+        data["thread_id"] = thread_id
+    return data
+
+
 # Node implementations
-
-
-def intake_node(state: TicketState) -> TicketState:
+def intake_node(state: TicketState, config: RunnableConfig) -> TicketState:
     """
     Normalize the ticket and extract a summary, sentiment, etc.
     """
-    ticket = state["ticket"]
+    ids = _ids_for_log(state, config)
+    log.info("node_start_intake", extra={"extra_data": ids})
 
+    ticket = state["ticket"]
     result = INTAKE_AGENT.invoke(
         {
             "ticket_content": ticket.get("content", ""),
@@ -86,14 +101,27 @@ def intake_node(state: TicketState) -> TicketState:
         }
     )
 
+    log.info(
+        "node_end_intake",
+        extra={
+            "extra_data": {
+                **ids,
+                "summary": result.get("summary"),
+                "sentiment": result.get("sentiment"),
+                "suspected_language": result.get("suspected_language"),
+            }
+        },
+    )
     return {"intake": result}
 
 
-def classifier_node(state: TicketState) -> TicketState:
+def classifier_node(state: TicketState, config: RunnableConfig) -> TicketState:
     """
-    Classify issue type, urgency, complexity, and whether it likely needs
-    escalation.
+    Classify issue type, urgency, complexity, and whether it likely needs escalation.
     """
+    ids = _ids_for_log(state, config)
+    log.info("node_start_classifier", extra={"extra_data": ids})
+
     ticket = state["ticket"]
     intake = state["intake"]
 
@@ -107,9 +135,19 @@ def classifier_node(state: TicketState) -> TicketState:
         }
     )
 
+    log.info(
+        "node_end_classifier",
+        extra={
+            "extra_data": {
+                **ids,
+                "issue_type": result.get("issue_type"),
+                "urgency": result.get("urgency"),
+                "complexity": result.get("complexity"),
+                "should_escalate_immediately": result.get("should_escalate_immediately"),
+            }
+        },
+    )
     return {"classification": result}
-
-
 
 async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketState:
     """
@@ -123,51 +161,241 @@ async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketSta
     - Uses LLM to craft final answer grounded in KB + tools.
     - Sets a confidence score and decides resolved vs needs_escalation.
     """
+    # IDs for logging
+    ids = _ids_for_log(state, config)
+    log.info("node_start_resolver", extra={"extra_data": ids})
 
     ticket = state["ticket"]
-    intake = state.get("intake", {})
-    classification = state.get("classification", {})
+    intake = state.get("intake", {}) or {}
+    classification = state.get("classification", {}) or {}
 
-    user_issue = intake.get("normalized_issue") or ticket.get("content", "")
+    # Raw user text from the ticket
+    raw_text = (ticket.get("content") or "").strip()
+    # Normalized summary from Intake (nice for LLM context, but not ideal as a SQL search string)
+    normalized_issue = (intake.get("normalized_issue") or "").strip()
+
+    # For the LLM answer, we still want the nice normalized issue if available
+    user_issue = normalized_issue or raw_text
+
+    # For KB search, lean on raw user question, optionally enriched with normalized form
+    kb_query_parts = [raw_text] if raw_text else []
+    if normalized_issue and normalized_issue.lower() not in raw_text.lower():
+        kb_query_parts.append(normalized_issue)
+    kb_query = " ".join(kb_query_parts).strip()
+
     external_user_id = ticket.get("owner_id")
     ticket_id = ticket.get("ticket_id")
+    thread_id = config.get("configurable", {}).get("thread_id") if config else None
 
-    # Knowledge retrieval via KB tool (async)
-    
-    used_kb_articles = []
-    kb_results = []
+    # Knowledge retrieval via KB tool (async) – with normalization to a list
+    used_kb_articles: list[str] = []
+    kb_results: list[dict[str, Any]] = []
     top_score = 0.0
 
-    if KB_SEARCH_TOOL is not None and user_issue:
-        kb_results = await KB_SEARCH_TOOL.ainvoke(
-            {"query": user_issue, "limit": 5}
-        ) or []
+    kb_tool = None
+    if kb_query:
+        try:
+            tools = await aget_kb_tools()
+            for t in tools:
+                if "kb_search" in t.name:
+                    kb_tool = t
+                    break
+        except Exception as e:
+            log.error(
+                "kb_tool_fetch_error",
+                extra={
+                    "extra_data": {
+                        "ticket_id": ticket_id,
+                        "thread_id": thread_id,
+                        "error": str(e),
+                    }
+                },
+            )
+
+    if kb_tool is not None and kb_query:
+        log.info(
+            "tool_call_kb_search_start",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "query": kb_query,
+                }
+            },
+        )
+
+        kb_raw = await kb_tool.ainvoke({"query": kb_query, "limit": 5}) or []
+
+        # Normalize JSON-string → list[dict]
+        if isinstance(kb_raw, str):
+            kb_raw = kb_raw.strip()
+            if kb_raw:
+                try:
+                    kb_results = json.loads(kb_raw)
+                except json.JSONDecodeError:
+                    kb_results = []
+            else:
+                kb_results = []
+        elif isinstance(kb_raw, list):
+            kb_results = kb_raw
+        else:
+            kb_results = []
+
         if kb_results:
             used_kb_articles = [
-                a.get("article_id") for a in kb_results if a.get("article_id")
+                a.get("article_id")
+                for a in kb_results
+                if isinstance(a, dict) and a.get("article_id")
             ]
-            top_score = float(kb_results[0].get("score", 0.0) or 0.0)
+            first = kb_results[0]
+            if isinstance(first, dict):
+                # In kb_search, "score" is the count of matching query words
+                top_score = float(first.get("score", 0.0) or 0.0)
 
+        log.info(
+            "tool_call_kb_search_end",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "result_count": len(kb_results),
+                    "top_score": top_score,
+                }
+            },
+        )
+
+    # Confidence based on KB hits + lexical overlap heuristic
     if not kb_results:
         confidence = 0.2
+        lexical_overlap = 0.0
     else:
-        # map score roughly into [0.3, 0.95]
-        confidence = max(0.3, min(0.95, top_score / 2.0 + 0.3))
+        # Base confidence mapping from raw score
+        base_confidence = max(0.5, min(0.95, top_score / 2.0 + 0.3))
+
+        # Compute lexical overlap: score / number of query tokens
+        query_tokens = [
+            w for w in kb_query.lower().split()
+            if w.strip()
+        ]
+        query_len = len(query_tokens) or 1
+        lexical_overlap = float(top_score) / float(query_len)
+
+        # If overlap is very low, clamp confidence down — KB hits are probably spurious
+        if lexical_overlap < 0.25:
+            confidence = min(base_confidence, 0.4)
+        else:
+            confidence = base_confidence
+
+    # Additional guard: salient token overlap between user query and KB content
+    SALIENT_STOPWORDS = {
+        "do", "does", "did", "you", "your", "yours",
+        "the", "and", "or", "for", "to", "of", "in", "on", "at",
+        "a", "an", "is", "are", "was", "were", "be", "been",
+        "with", "about", "this", "that", "it", "my", "our", "we",
+        "can", "could", "would", "should"
+    }
+
+    # salient tokens only from the *raw* user text
+    raw_tokens = [
+        t.strip("?,.!").lower()
+        for t in raw_text.split()
+        if t.strip()
+    ]
+    salient_tokens = {
+        t for t in raw_tokens
+        if len(t) >= 4 and t not in SALIENT_STOPWORDS
+    }
+
+    kb_text_concat = ""
+    if kb_results:
+        kb_text_concat = " ".join(
+            (art.get("title", "") + " " + art.get("content", ""))
+            for art in kb_results[:3]
+        ).lower()
+
+    salient_hits = [
+        t for t in salient_tokens
+        if t in kb_text_concat
+    ]
+    salient_overlap = (
+        len(salient_hits) / float(len(salient_tokens))
+        if salient_tokens else 0.0
+    )
+
+    # If salient overlap is very low, clamp confidence as well
+    if kb_results and salient_tokens and salient_overlap < 0.4:
+        confidence = min(confidence, 0.4)
+
+    log.info(
+        "resolver_kb_confidence",
+        extra={
+            "extra_data": {
+                "ticket_id": ticket_id,
+                "thread_id": thread_id,
+                "kb_result_count": len(kb_results),
+                "top_score": top_score,
+                "lexical_overlap": lexical_overlap,
+                "salient_overlap": salient_overlap,
+                "salient_tokens": list(salient_tokens),
+                "salient_hits": salient_hits,
+                "confidence": confidence,
+            }
+        },
+    )
 
     # Account lookup for personalization (async)
-    
     account_snippet = ""
 
     if external_user_id and ACCOUNT_GET_USER_TOOL is not None:
+        log.info(
+            "tool_call_account_get_user_start",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "external_user_id": external_user_id,
+                }
+            },
+        )
         user_info = await ACCOUNT_GET_USER_TOOL.ainvoke(
             {"external_user_id": external_user_id}
+        )
+        log.info(
+            "tool_call_account_get_user_end",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "has_user_info": bool(user_info),
+                }
+            },
         )
         if user_info:
             account_snippet += f"User profile: {user_info}\n\n"
 
     if external_user_id and ACCOUNT_GET_RESERVATIONS_TOOL is not None:
+        log.info(
+            "tool_call_account_get_reservations_start",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "external_user_id": external_user_id,
+                }
+            },
+        )
         reservations = await ACCOUNT_GET_RESERVATIONS_TOOL.ainvoke(
             {"external_user_id": external_user_id}
+        )
+        log.info(
+            "tool_call_account_get_reservations_end",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "reservations_count": len(reservations) if reservations else 0,
+                }
+            },
         )
         if reservations:
             account_snippet += f"Current reservations: {reservations}\n\n"
@@ -175,12 +403,33 @@ async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketSta
     # Long-term memory search (async)
     memory_snippet = ""
     if external_user_id and MEMORY_SEARCH_TOOL is not None:
+        log.info(
+            "tool_call_memory_search_start",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "external_user_id": external_user_id,
+                    "query": user_issue,
+                }
+            },
+        )
         memories = await MEMORY_SEARCH_TOOL.ainvoke(
             {
                 "external_user_id": external_user_id,
                 "query": user_issue,
                 "limit": 5,
             }
+        )
+        log.info(
+            "tool_call_memory_search_end",
+            extra={
+                "extra_data": {
+                    "ticket_id": ticket_id,
+                    "thread_id": thread_id,
+                    "memories_count": len(memories) if memories else 0,
+                }
+            },
         )
         if memories:
             memory_snippet = f"Relevant prior memories: {memories}\n\n"
@@ -196,7 +445,13 @@ async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketSta
         kb_snippet = "\n\n---\n\n".join(kb_snippet_lines)
 
     # Decide if we should attempt resolution or escalate
-    likely_resolvable = bool(kb_results) and confidence >= 0.5
+    # Require: some KB hits, reasonable confidence, and non-trivial overlaps
+    likely_resolvable = (
+        bool(kb_results)
+        and confidence >= 0.5
+        and lexical_overlap >= 0.3
+        and (not salient_tokens or salient_overlap >= 0.4)
+    )
 
     if not likely_resolvable:
         resolution = {
@@ -208,13 +463,35 @@ async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketSta
             "confidence": confidence,
             "used_kb_articles": used_kb_articles,
             "notes_for_human": (
-                "KB search returned no strong matches or low scores. "
+                "KB search returned no clearly related matches for the key terms in the "
+                f"user's question (salient_overlap={salient_overlap:.2f}). "
                 "Please manually review the issue and consider updating the KB."
             ),
         }
+        log.info(
+            "resolver_decision_needs_escalation",
+            extra={
+                "extra_data": {
+                    **ids,
+                    "confidence": confidence,
+                    "kb_result_count": len(kb_results),
+                    "lexical_overlap": lexical_overlap,
+                    "salient_overlap": salient_overlap,
+                }
+            },
+        )
+        log.info(
+            "node_end_resolver",
+            extra={
+                "extra_data": {
+                    **ids,
+                    "status": "needs_escalation",
+                }
+            },
+        )
         return {"resolution": resolution}
 
-    # Use LLM to craft a grounded answer (sync LLM call is OK here)
+    # Use LLM to craft a grounded answer
     system_prompt = (
         "You are the Resolver Agent for UDA-Hub, helping CultPass users.\n"
         "You MUST base your answer ONLY on the knowledge base articles and data provided.\n"
@@ -258,7 +535,24 @@ async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketSta
         "notes_for_human": notes_for_human,
     }
 
-    # Write long-term memory (async, best-effort)
+    log.info(
+        "resolver_decision_resolved",
+        extra={
+            "extra_data": {
+                **ids,
+                "confidence": confidence,
+                "kb_result_count": len(kb_results),
+                "lexical_overlap": lexical_overlap,
+                "salient_overlap": salient_overlap,
+            }
+        },
+    )
+    log.info(
+        "node_end_resolver",
+        extra={"extra_data": {**ids, "status": "resolved"}},
+    )
+
+    # Write long-term memory (best-effort)
     if external_user_id and MEMORY_WRITE_TOOL is not None:
         try:
             await MEMORY_WRITE_TOOL.ainvoke(
@@ -274,15 +568,19 @@ async def resolver_node(state: TicketState, config: RunnableConfig) -> TicketSta
                 }
             )
         except Exception:
-            # Don't fail the whole workflow if memory write fails.
+            # Don't break the workflow on memory write failure
             pass
 
     return {"resolution": resolution}
 
-def escalation_node(state: TicketState) -> TicketState:
+
+def escalation_node(state: TicketState, config: RunnableConfig) -> TicketState:
     """
     Prepare a structured escalation summary for a human agent.
     """
+    ids = _ids_for_log(state, config)
+    log.info("node_start_escalation", extra={"extra_data": ids})
+
     ticket = state["ticket"]
     intake = state.get("intake", {})
     classification = state.get("classification", {})
@@ -300,13 +598,26 @@ def escalation_node(state: TicketState) -> TicketState:
         }
     )
 
+    log.info(
+        "node_end_escalation",
+        extra={
+            "extra_data": {
+                **ids,
+                "recommended_department": result.get("recommended_department"),
+            }
+        },
+    )
+
     return {"escalation": result}
 
 
-def supervisor_node(state: TicketState) -> TicketState:
+def supervisor_node(state: TicketState, config: RunnableConfig) -> TicketState:
     """
     Decide the next step: 'resolver', 'escalation', or 'done'.
     """
+    ids = _ids_for_log(state, config)
+    log.info("node_start_supervisor", extra={"extra_data": ids})
+
     intake = state.get("intake", {})
     classification = state.get("classification", {})
     resolution = state.get("resolution", {})
@@ -322,15 +633,31 @@ def supervisor_node(state: TicketState) -> TicketState:
         }
     )
 
+    log.info(
+        "supervisor_decision",
+        extra={
+            "extra_data": {
+                **ids,
+                "next_step": result.get("next_step"),
+                "reason": result.get("reason"),
+                "issue_type": classification.get("issue_type", "other"),
+                "urgency": classification.get("urgency", "low"),
+                "complexity": classification.get("complexity", "low"),
+            }
+        },
+    )
+
+    log.info(
+        "node_end_supervisor",
+        extra={"extra_data": {**ids, "next_step": result.get("next_step")}},
+    )
+
     return {"supervisor": result}
 
 
-# Routing logic for conditional edges
+# Routing logic
 
 def route_from_supervisor(state: TicketState) -> str:
-    """
-    Inspect supervisor.next_step and decide which node to visit next.
-    """
     supervisor = state.get("supervisor", {}) or {}
     next_step = supervisor.get("next_step", "done")
 
@@ -338,46 +665,26 @@ def route_from_supervisor(state: TicketState) -> str:
         return "resolver"
     if next_step == "escalation":
         return "escalation"
-    # default
     return END
 
 
-# Build and compile the LangGraph workflow
+# Build and compile workflow
 
 def build_workflow():
-    """
-    Build and compile the UDA-Hub multi-agent workflow graph.
-
-    Nodes:
-        - intake
-        - classifier
-        - supervisor
-        - resolver
-        - escalation
-
-    Edges:
-        START -> intake -> classifier -> supervisor
-        supervisor -> resolver / escalation / END (conditional)
-        resolver -> supervisor
-        escalation -> END
-    """
     graph = StateGraph(TicketState)
 
-    # Add nodes
     graph.add_node("intake", intake_node)
     graph.add_node("classifier", classifier_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("resolver", resolver_node)
     graph.add_node("escalation", escalation_node)
 
-    # Fixed edges
     graph.add_edge(START, "intake")
     graph.add_edge("intake", "classifier")
     graph.add_edge("classifier", "supervisor")
     graph.add_edge("resolver", "supervisor")
     graph.add_edge("escalation", END)
 
-    # Conditional edges from supervisor
     graph.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
@@ -388,38 +695,52 @@ def build_workflow():
         },
     )
 
-    # Use MemorySaver for short-term conversation memory
     memory = MemorySaver()
     app = graph.compile(checkpointer=memory)
     return app
 
 
-# Convenience: instantiate a module-level workflow app
 orchestrator = build_workflow()
 
 
 def run_ticket(ticket: Dict[str, Any], thread_id: str) -> TicketState:
     """
-    Convenience wrapper to run the LangGraph workflow for a single ticket.
-
-    This uses the async API under the hood (ainvoke) because some nodes,
-    such as the resolver, are async-only (they call async MCP tools).
+    Run the LangGraph workflow for a single ticket.
     """
-
     initial_state: TicketState = {
         "ticket": ticket,
-        "intake": None,
-        "classification": None,
-        "resolution": None,
-        "escalation": None,
-        "supervisor": None,
     }
 
-    config = {
+    config: RunnableConfig = {
         "configurable": {
             "thread_id": thread_id,
         }
     }
 
-    return asyncio.run(orchestrator.ainvoke(initial_state, config=config))
+    log.info(
+        "workflow_start",
+        extra={
+            "extra_data": {
+                "ticket_id": ticket.get("ticket_id"),
+                "thread_id": thread_id,
+            }
+        },
+    )
 
+    final_state = asyncio.run(orchestrator.ainvoke(initial_state, config=config))
+
+    # Log final resolution object
+    resolution = (final_state or {}).get("resolution", {})
+    log.info(
+        "workflow_completed",
+        extra={
+            "extra_data": {
+                "ticket_id": ticket.get("ticket_id"),
+                "thread_id": thread_id,
+                "final_status": resolution.get("status"),
+                "final_confidence": resolution.get("confidence"),
+            }
+        },
+    )
+
+    return final_state

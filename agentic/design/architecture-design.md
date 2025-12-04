@@ -45,6 +45,199 @@ The orchestrator defines:
 Located in:
 agentic/workflow.py
 
+### 3.2 Logging & Observability
+
+UDA-Hub implements structured JSON logging end-to-end so every ticket can be fully traced through Intake → Classification → Supervisor → Resolver → Escalation → Completion.
+
+All logs are emitted using a shared JSON logger (logger.get_logger()), used by:
+
+* agentic/workflow.py — node lifecycle, tool calls, supervisor decisions, resolver scoring
+
+* 03_agentic_app.py — CLI + demo workflow events
+
+### Log destinations
+
+- **Stdout** – convenient during local development / debugging  
+- **File** – JSONL file with one event per line:
+
+```
+logs/uda_hub.jsonl
+
+```
+
+each line is a a JSON object, for example:
+```
+{
+  "timestamp": "2025-12-02T09:42:10.123456Z",
+  "level": "INFO",
+  "message": "supervisor_decision",
+  "extra": {
+    "ticket_id": "DEMO-TICKET-001",
+    "thread_id": "DEMO-TICKET-001",
+    "issue_type": "login",
+    "urgency": "high",
+    "complexity": "medium",
+    "next_step": "escalation",
+    "resolver_status": "needs_escalation",
+    "resolver_confidence": 0.2
+  }
+}
+
+
+```
+
+the system logs:
+
+* Node Lifecycle Events
+
+Each workflow node logs both start and end events:
+
+    * node_start_intake, node_end_intake
+
+    * node_start_classifier, node_end_classifier
+
+    * node_start_supervisor, node_end_supervisor
+
+    * node_start_resolver, node_end_resolver
+
+    * node_start_escalation, node_end_escalation
+
+Fields include:
+
+    * ticket_id
+
+    * thread_id
+
+* Supervisor Decisions
+
+Event: supervisor_decision
+
+Fields captured:
+
+    * ticket_id, thread_id
+
+    * issue_type, urgency, complexity
+
+    * resolver_status (nullable)
+
+    * resolver_confidence
+
+    * next_step → resolver | escalation | done
+
+    * reason
+    
+* Tool Calls (MCP Tools)
+
+All MCP tools emit start and end logs:
+
+    * tool_call_kb_search_start / tool_call_kb_search_end
+
+    * tool_call_account_get_user_start / tool_call_account_get_user_end
+
+    * tool_call_account_get_reservations_start / tool_call_account_get_reservations_end
+
+    * tool_call_memory_search_start / tool_call_memory_search_end
+
+Fields captured:
+
+    * ticket_id, thread_id
+
+    * tool_name
+
+    * Sanitized inputs (e.g., query, external_user_id)
+
+    * Result metrics, e.g.:
+
+        * result_count
+
+        * memories_count
+
+        * reservations_count
+
+        * KB scoring:
+
+        * top_score
+
+        * lexical_overlap
+
+        * salient_overlap
+
+        * salient_tokens
+
+        * salient_hits
+
+* Resolver Outcomes
+
+The resolver logs detailed decision information:
+
+    * resolver_kb_confidence
+
+    * resolver_decision_resolved
+
+    * resolver_decision_needs_escalation
+
+Fields include:
+
+    * kb_result_count
+
+    * top_score
+
+    * lexical_overlap
+
+    * salient_overlap
+
+    * confidence
+
+    * Decision status
+    
+* Final Workflow Summary
+
+Event: workflow_completed
+
+Fields:
+
+    * ticket_id, thread_id
+
+    * final_status → resolved | needs_escalation
+
+    * final_confidence
+    
+* CLI / Demo Events
+
+For interactive or scripted runs:
+
+    * cli_ticket_received
+
+    * cli_workflow_result
+
+    * demo_ticket_received
+
+    * demo_workflow_result
+
+Fields include:
+
+    * issue_type, urgency, complexity
+
+    * supervisor_next_step
+
+    * resolution_status
+
+    * resolution_confidence
+
+These structured logs provide:
+
+    * Full traceability of every ticket
+
+    * Complete visibility into agent decisions
+
+    * Debugging of KB search quality
+
+    * Auditing of tool interactions
+
+    * End-to-end observability for platform monitoring and analytics
+
+This enables reliable analysis of system behavior and ensures tickets can be tracked from first user input → final resolution with no black boxes.
+
 ## 4. Agent Interaction & Decision Flow
 
 UDA-Hub uses a **Supervisor-based multi-agent architecture**:
