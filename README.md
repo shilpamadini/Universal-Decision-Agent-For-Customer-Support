@@ -521,7 +521,7 @@ python 03_agentic_app.py --mode demo
 Run interactive mode:
 
 ```
-python 03_agentic_app.py --mode interactive
+python 03_agentic_app.py --mode chat
 
 ```
 
