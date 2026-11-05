@@ -1,551 +1,121 @@
-# Universal Decision Agent: Multi-Agent Customer Support Orchestrator
+# Universal Decision Agent
 
-Universal Decision Agent is a fully functional multi-agent support automation system built with LangGraph, LangChain, FastMCP, and SQLite.
-It processes customer support tickets end-to-end through intelligent agents that ingest, classify, resolve, and escalate issues while integrating data from:
+面向客服场景的多智能体决策与工单工作流。后端使用 LangGraph 编排客服工作流，通过 MCP 工具查询公开知识和用户账户信息、向用户澄清问题，或将摘要交给飞书人工客服；前端通过工单 API 提交消息，并通过 SSE 接收工单状态和客服回复。
 
-Knowledge Base (KB)
+## 当前能力
 
-Account & Reservation System (CultPass)
+- **公开知识查询**：Supervisor 将政策和帮助文档问题交给 `public_knowledge` 专家，通过 Qdrant 检索并核对候选答案。
+- **账户信息查询**：`account` 专家通过 MCP 查询现有用户资料和预约信息。
+- **澄清与人工交接**：信息不足时可请求用户补充；需要人工处理时，将工单摘要发送到配置的飞书群。
+- **普通工单闭环**：前端提交消息后，后端创建工单并在后台运行工作流；前端用 SSE 接收受理、状态和 AI 回复事件。
+- **工单持久化**：工单、事件和 LangGraph 检查点使用 SQLite 保存；事件写入失败时仍尝试向当前在线订阅者发送原事件。
 
-Long-Term Memory
+Supervisor 负责决定是否调用专家或工具，并生成最终客服回复。当前工作流只读取账户和公开知识，不执行账户写入操作，也不查询历史工单来回答用户问题。
 
-The system chooses actions dynamically using a Supervisor agent and tools, following a hierarchical multi-agent pattern that supports real-time decision making and human escalation.
+## 架构
 
-This project meets and exceeds the Udacity rubric for the Multi-Agent Editing & Decisioning track.
+```mermaid
+flowchart LR
+    Browser[浏览器]
+    Next[Next.js 前端与 API 代理]
+    API[FastAPI]
+    Workflow[LangGraph 客服工作流]
+    Supervisor[Supervisor]
+    Public[公开知识专家]
+    Account[账户专家]
+    Qdrant[Qdrant MCP]
+    AccountMCP[Account MCP]
+    SQLite[(SQLite 工单、事件与检查点)]
+    UserDB[(SQLite 用户数据库)]
+    Hub[进程内用户事件中心]
+    Feishu[飞书客服群]
 
-## Table of Contents
-
-1. Overview
-2. Architecture & Design
-    * Multi-Agent Pattern
-    * Architecture Diagram
-    * State Schema
-3. Agents & Responsibilities
-4. Knowledge, Tools & MCP Services
-5. Ticket Processing Flow
-6. Short-Term & Long-Term Memory
-7. Repository Structure
-8. Setup Instructions
-9. Running the App
-10. Running Tests
-
-## Overview
-
-Universal Decision Agent simulates a production-grade customer-support agent system, capable of:
-
-* Understanding incoming tickets
-
-* Classifying issue type & urgency
-
-* Searching KB for solutions
-
-* Looking up user profiles & reservations
-
-* Consulting long-term memory for prior issues
-
-* Attempting resolution with confidence scoring
-
-* Escalating to human agents when needed
-
-* Producing structured explanations for support teams
-
-It runs on a hybrid of rule-based routing and agentic reasoning, and integrates multiple data sources via FastMCP servers that behave like external microservices.
-
-## Architecture & Design
-
-### Multi-Agent Pattern
-
-The system uses a Supervisor / Hierarchical agent design:
-    * Supervisor Agent acts as the central router
-    * Intake Agent standardizes the ticket
-    * Classifier Agent determines issue characteristics
-    * Resolver Agent uses tools & memory to attempt solutions
-    * Escalation Agent handles human-handoff summaries
-Each agent writes into a shared LangGraph state, and the supervisor decides the next step based on the evolving state.
-
-### Architecture Diagram
-
-![Graph](https://github.com/shilpamadini/Universal-Decision-Agent-For-Customer-Support/blob/8765e484244cbeb24af5deb5dff2d88e7cbcf8fd/agentic/design/Graph.jpeg)
-
-
-### State Management
-
-The LangGraph state schema:
-
-```
-class TicketState(TypedDict, total=False):
-    ticket: Dict[str, Any]
-    intake: Dict[str, Any]
-    classification: Dict[str, Any]
-    resolution: Dict[str, Any]
-    escalation: Dict[str, Any]
-    supervisor: Dict[str, Any]
+    Browser -->|POST 工单| Next --> API
+    API -->|校验用户| UserDB
+    API --> Workflow --> Supervisor
+    Supervisor --> Public --> Qdrant
+    Supervisor --> Account --> AccountMCP
+    Supervisor -->|人工交接| Feishu
+    Workflow --> SQLite
+    Workflow --> Hub -->|SSE| API --> Next --> Browser
 ```
 
-Stored per thread_id using MemorySaver.
+## 普通工单流程
 
+1. 浏览器将 `{ user_id, message }` 发送到 Next.js 的 `/api/tickets` 代理。
+2. FastAPI 检查用户 ID 是否存在，创建工单并在后台启动 LangGraph 工作流，立即返回 `202 Accepted` 和工单编号。
+3. 浏览器保持 SSE 连接，实时接收工单处理进度和回复。
+4. 工作流结束后，前端展示 AI 回复及最终工单状态。
 
-## Logging & Observability
+## 本地运行
 
-UDA-Hub implements structured JSON logging end-to-end so every ticket can be fully traced through Intake → Classification → Supervisor → Resolver → Escalation → Completion.
+### 1. 准备配置和依赖
 
-All logs are emitted using a shared JSON logger (logger.get_logger()), used by:
+使用项目 Python 虚拟环境安装依赖：
 
-* agentic/workflow.py — node lifecycle, tool calls, supervisor decisions, resolver scoring
-
-* 03_agentic_app.py — CLI + demo workflow events
-
-### Log destinations
-
-- **Stdout** – convenient during local development / debugging  
-- **File** – JSONL file with one event per line:
-
-```
-logs/uda_hub.jsonl
-
+```powershell
+.\.venv\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-each line is a a JSON object, for example:
-```
-{
-  "timestamp": "2025-12-02T09:42:10.123456Z",
-  "level": "INFO",
-  "message": "supervisor_decision",
-  "extra": {
-    "ticket_id": "DEMO-TICKET-001",
-    "thread_id": "DEMO-TICKET-001",
-    "issue_type": "login",
-    "urgency": "high",
-    "complexity": "medium",
-    "next_step": "escalation",
-    "resolver_status": "needs_escalation",
-    "resolver_confidence": 0.2
-  }
-}
+在 `.env` 中至少配置：
 
+- `DEEPSEEK_API_KEY`：客服工作流模型密钥。
+- `LARK_APP_ID`、`LARK_APP_SECRET`、`FEISHU_CHAT_ID`：飞书机器人及客服群配置。
+- `QDRANT_URL`：Qdrant 服务地址；默认 `http://127.0.0.1:6333`。
+- `COLLECTION_NAME` 及 embedding 配置：与已有 Qdrant collection 保持一致。
 
+先启动并准备好 Qdrant collection 和用户数据库。当前 FastAPI lifespan 会连接飞书并初始化工作流，因此模型密钥、飞书配置和所需服务不可用时，服务不能完成启动。
+
+### 2. 启动后端
+
+```powershell
+.\.venv\python.exe -m uvicorn agentic.app.fastapi_server:app --host 127.0.0.1 --port 8001
 ```
 
-the system logs:
+访问 <http://127.0.0.1:8001/health> 查看状态。工作流依赖对应的用户记录、模型、Qdrant 和飞书配置。
 
-* Node Lifecycle Events
+### 3. 启动前端
 
-Each workflow node logs both start and end events:
-
-    * node_start_intake, node_end_intake
-
-    * node_start_classifier, node_end_classifier
-
-    * node_start_supervisor, node_end_supervisor
-
-    * node_start_resolver, node_end_resolver
-
-    * node_start_escalation, node_end_escalation
-
-Fields include:
-
-    * ticket_id
-
-    * thread_id
-
-* Supervisor Decisions
-
-Event: supervisor_decision
-
-Fields captured:
-
-    * ticket_id, thread_id
-
-    * issue_type, urgency, complexity
-
-    * resolver_status (nullable)
-
-    * resolver_confidence
-
-    * next_step → resolver | escalation | done
-
-    * reason
-    
-* Tool Calls (MCP Tools)
-
-All MCP tools emit start and end logs:
-
-    * tool_call_kb_search_start / tool_call_kb_search_end
-
-    * tool_call_account_get_user_start / tool_call_account_get_user_end
-
-    * tool_call_account_get_reservations_start / tool_call_account_get_reservations_end
-
-    * tool_call_memory_search_start / tool_call_memory_search_end
-
-Fields captured:
-
-    * ticket_id, thread_id
-
-    * tool_name
-
-    * Sanitized inputs (e.g., query, external_user_id)
-
-    * Result metrics, e.g.:
-
-        * result_count
-
-        * memories_count
-
-        * reservations_count
-
-        * KB scoring:
-
-        * top_score
-
-        * lexical_overlap
-
-        * salient_overlap
-
-        * salient_tokens
-
-        * salient_hits
-
-* Resolver Outcomes
-
-The resolver logs detailed decision information:
-
-    * resolver_kb_confidence
-
-    * resolver_decision_resolved
-
-    * resolver_decision_needs_escalation
-
-Fields include:
-
-    * kb_result_count
-
-    * top_score
-
-    * lexical_overlap
-
-    * salient_overlap
-
-    * confidence
-
-    * Decision status
-    
-* Final Workflow Summary
-
-Event: workflow_completed
-
-Fields:
-
-    * ticket_id, thread_id
-
-    * final_status → resolved | needs_escalation
-
-    * final_confidence
-    
-* CLI / Demo Events
-
-For interactive or scripted runs:
-
-    * cli_ticket_received
-
-    * cli_workflow_result
-
-    * demo_ticket_received
-
-    * demo_workflow_result
-
-Fields include:
-
-    * issue_type, urgency, complexity
-
-    * supervisor_next_step
-
-    * resolution_status
-
-    * resolution_confidence
-
-These structured logs provide:
-
-    * Full traceability of every ticket
-
-    * Complete visibility into agent decisions
-
-    * Debugging of KB search quality
-
-    * Auditing of tool interactions
-
-    * End-to-end observability for platform monitoring and analytics
-
-This enables reliable analysis of system behavior and ensures tickets can be tracked from first user input → final resolution with no black boxes.
-
-## Agents & Responsibilities
-
-1. Intake Agent
-
-Normalizes incoming ticket content.
-
-Outputs:
-* summary
-* normalized_issue
-* sentiment
-
-2. Classifier Agent
-
-Predicts:
-
-* issue_type (login / billing / reservation / account / other)
-* urgency (low / medium / high)
-* complexity (low / medium / high)
-* escaltion
-* rationale
-
-3. Resolver Agent
-
-Uses MCP tools:
-
-* kb_search
-* account_get_user
-* account_get_user_reservations
-* memory_search
-* memory_write
-
-Produces:
-
-* status: resolved / needs_escalation
-* answer
-* confidence
-* used_kb_articles
-* notes_for_human
-
-4. Escalation Agent
-
-Generates human-ready summary including:
-
-* issue summary
-* recommended department
-* next steps
-* optional inclusion of resolver notes
-
-5. Supervisor Agent
-
-Routes between:
-
-* resolver
-* escalation
-* done
-
-Rules include escalation checks, resolver confidence threshold, and classification hints.
-
-## Knowledge, Tools & MCP Services
-
-Universal Decision Agent  connects to three FastMCP microservices:
-
-### KB Server (kb/)
-
-* Searches the knowledge base table
-* Tool: kb_search(query, limit)
-
-### Account Server (account/)
-
-* Fetches user profile + user reservations
-* Tools:
-    account_get_user(external_user_id)
-    account_get_user_reservations(external_user_id)
-
-### Memory Server (memory/)
-
-* Long-term memory write & search
-* Tools:
-    memory_write(...)
-    memory_search(...)
-    memory_get_all(external_user_id)
-These tools are wrapped and used inside the Resolver Agent.
-
-## Ticket Processing Flow
-```
-Incoming ticket
-    ↓
-Intake Agent (normalize)
-    ↓
-Classifier Agent (problem type, urgency)
-    ↓
-Supervisor Agent
-    ↳ Resolver Agent → try to solve via tools
-        ↳ If confident: DONE
-        ↳ If not: back to Supervisor
-    ↳ Escalation Agent → human summary
-    ↳ DONE
-
-```
-Everything is stored in the LangGraph state and returned as the final output.
-
-## Memory Design
-
-### Short-Term (Per-Ticket)
-
-* Backed by LangGraph MemorySaver
-* Stores intermediate agent outputs
-
-### Long-Term (Cross-Ticket)
-
-* SQLite backed
-* Accessed via MCP
-* Stores historical issue content, metadata, timestamps
-* Used by Resolver to personalize answers
-
-## Repository Structure
-```
-uda-hub/
-├── README.md
-├── requirements.txt
-├── .gitignore
-├── .env                                # Local environment variables
-│
-├── 01_external_db_setup.ipynb          # Notebook: loads JSONL → external DB
-├── 02_core_db_setup.ipynb              # Notebook: builds core DB schema
-├── 03_agentic_app.py                   # Entry script to run full UDA-Hub workflow
-│
-├── agentic/                            # LangGraph + Agent layer
-│   ├── __init__.py
-│   ├── workflow.py                     # Full StateGraph workflow (intake → classifier → supervisor → resolver/escalation)
-│   │
-│   ├── agents/                         # All agent definitions
-│   │   ├── __init__.py
-│   │   ├── intake_agent.py
-│   │   ├── classifier_agent.py
-│   │   ├── resolver_agent.py
-│   │   ├── escalation_agent.py
-│   │   ├── supervisor_agent.py
-│   │
-│   ├── tools/                          # MCP client wrappers (async)
-│       ├── __init__.py
-│       ├── mcp_client.py               # MCP connection + dynamic tool loader
-│       ├── knowledge_client.py         # KB search/get
-│       ├── account_client.py           # Account get_user + get_user_reservations
-│       ├── memory_client.py            # Memory write + search
-│
-├── mcp_services/                       # All MCP Servers (FastMCP)
-│   ├── kb/
-│   │   ├── server.py                   # Knowledge Base MCP tool server
-│   │
-│   ├── account/
-│   │   ├── server.py                   # Account MCP server
-│   │
-│   ├── memory/
-│       ├── server.py                   # Memory MCP server
-│
-├── data/
-│   ├── models/                         # SQLAlchemy DB models
-│   │   ├── udahub.py                   # Core DB models (Memory + Mapping)
-│   │   ├── cultpass.py                 # External CultPass models
-│   │
-│   ├── external/                       # External “source-of-truth”
-│   │   ├── cultpass_users.jsonl
-│   │   ├── cultpass_articles.jsonl
-│   │   ├── cultpass_experiences.jsonl
-│   │   ├── cultpass.db
-│   │
-│   ├── core/
-│       ├── udahub.db                   # Main core DB
-│       ├── memory.db                   # Memory DB
-│
-├── tests/                              # Full pytest suite
-│   ├── conftest.py
-│   ├── test_kb_tool.py                 # Tests for KB MCP server
-│   ├── test_account_tool.py            # Tests for Account MCP server
-│   ├── test_memory_tool.py             # Tests for Memory MCP server
-│   ├── test_routing.py                 # Tests for workflow routing logic
-│   ├── test_end_to_end.py              # Full end-to-end test of UDA-Hub orchestration
-│
-├── utils.py                            # Shared utility functions
-│
-├── dump_mermaid.py                     # utility to draw mermaid diagram of the graph
-├── debug_kb_direct.py                  # utility to debug the kb response
-├── logger.py                           # utility for logging
-├── logs/                               # Full pytest suite
-│   ├── uda_hub.jsonl                   # Log file
-
+```powershell
+Set-Location frontend
+npm install
+npm run dev
 ```
 
-## Setup Instructions
-1. Create and activate environment
+打开 <http://localhost:3000>。前端默认连接 `http://127.0.0.1:8001`；如需更改，在 `frontend/.env.local` 设置 `CUSTOMER_SUPPORT_API_URL` 后重启 Next.js。
 
-```
-conda create -n uda-hub python=3.11 -y
-conda activate uda-hub
+## 主要目录
 
-```
-
-3. Install dependencies
-```
-pip install -r requirements.txt
-
-```
-
-4. Configure environment variable
-
-```
-touch .env
-
-```
-Edit the .env to add key for openai 
-
-```
-OPENAI_API_KEY=your_openai_key_here
-
-```
-
-6. Build databases
-
-Run:
-
-* 01_external_db_setup.ipynb
-
-* 02_core_db_setup.ipynb
-
-These create:
-
-* data/external/cultpass.db
-
-* data/core/udahub.db
-
-## Running the App
-
-Run a demo ticket:
-
-```
-python 03_agentic_app.py --mode demo
-
+```text
+agentic/
+  agents/                Supervisor、账户和公开知识 Agent
+  app/                   FastAPI 应用与 SSE 事件流
+  capabilities/          飞书、MCP 客户端、中间件和工具
+  data/tickets/          工单、事件和对话记录存储
+  evals/                 工作流和检索评估
+  lifespan/              应用运行时资源初始化
+  observability/         工作流追踪
+  orchestration/         工单生命周期及 LangGraph 工作流
+  config.yml             模型、工具和工作流配置
+mcp_services/
+  account/               账户查询 MCP 服务
+  kb/                    知识库 MCP 服务
+  memory/                记忆 MCP 服务
+  qdrant/                Qdrant 检索 MCP 服务
+frontend/                Next.js 客服聊天前端及 API 代理
+data/
+  core/                  核心用户数据
+  external/              外部账户与预约数据
+  models/                数据模型
+scripts/                 数据迁移、开发和图表脚本
+tests/                   工作流、API、工单存储和工具测试
 ```
 
-Run interactive mode:
+## 当前限制
 
-```
-python 03_agentic_app.py --mode chat
-
-```
-
-## Running Tests
-
-```
-pytest -q
-
-```
-
-You should see the test output as:
-
-```
-8 passed in XXs
-
-```
-
-## To inspect structured logs:
-
-```
-# Run the demo and show only final workflow completion events
-python 03_agentic_app.py --mode demo 2>&1 | grep '"workflow_completed"'
-
-# Show all supervisor decisions
-python 03_agentic_app.py --mode demo 2>&1 | grep '"supervisor_decision"'
-
-```
+- 登录只记录用户 ID，不构成身份验证；后端通过用户记录存在性校验请求。正式部署前需要补上身份验证和授权。
+- SSE 事件中心在进程内存中，服务重启或多进程部署时不提供跨进程广播。
+- SSE 当前只推送实时事件，不支持断线后的事件回放；事件落库失败时，在线订阅者仍可能收到原事件，但该事件没有持久化序号，不能回放。
+- 飞书消息桥接与客服工单 SSE 是不同通道；飞书人工回复目前不会自动回流到对应工单对话。
+- `GET /tickets/{ticket_id}` 可查询单张工单状态，但前端当前实时交互以 SSE 为主。

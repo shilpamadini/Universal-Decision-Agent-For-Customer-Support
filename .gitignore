@@ -42,6 +42,47 @@ env/
 .pytest_cache/
 */.pytest_cache/
 
+# Local FastEmbed model weights (large, machine-specific cache)
+/mcp_services/qdrant/.cache/
+
+# Common local cache and temporary directories
+**/.cache/
+**/tmp/
+**/temp/
+
+# SQLite transient journal files
+*-shm
+*-wal
+
+# Pytest/evaluation work directories
+**/.pytest-*/
+**/.pytest-temp-*/
+**/.pytest_tmp_*/
+
+# Local agent scratch work, including task specs and test evidence
+/.scratch/
+/.archify/
+
+# Local wiki import staging area (source files are maintained in the wiki)
+/.wiki-ingest/
+
+# Local documentation and runtime logs
+/docs/
+/logs/
+
+# Root-level local Markdown notes (subdirectories remain unaffected)
+/*.md
+!/README.md
+/AGENTS.md
+/agentic/agents/history/
+/agentic/agents/*/history/
+
+# Local evaluation outputs and archived retrieval snapshots
+/evals/results/
+/agentic/evals/results/
+/evals/datasets/history/
+/agentic/evals/datasets/history/
+/.tmp/
 
 
 
@@ -49,3 +90,9 @@ env/
 
 
 
+
+.scratch/customer-support-v6/map.md
+.scratch/customer-support-v6/map.md
+mcp_services/qdrant/README.md
+mcp_services/qdrant/README.md
+mcp_services/qdrant/history/v2026-10-31-before-collection-default/tool_schema.json
